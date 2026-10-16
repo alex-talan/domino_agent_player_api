@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-core-tools"
+version = "0.1.0"
+description = "Tool ports and entities for ai-core agents"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+pythonpath = ["."]
+
+[tool.hatch.build.targets.wheel]
+sources = {"." = "tools"}
+include = ["*.py", "domain/**"]

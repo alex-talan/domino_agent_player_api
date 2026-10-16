@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-core-source_loader"
+version = "0.1.0"
+description = "Source loader module for ai-core — resolves ContentSource into LoadedSource objects"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+sharepoint = [
+    "msal>=1.28",
+    "requests>=2.32",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+
+[tool.hatch.build.targets.wheel]
+sources = {"." = "source_loader"}
+include = ["*.py", "domain/**", "infrastructure/**"]

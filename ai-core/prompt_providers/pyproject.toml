@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-core-prompt_providers"
+version = "0.1.0"
+description = "Prompt template rendering module for ai-core"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain-core>=1.0",
+    "langsmith>=0.14",
+    "jinja2>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+pythonpath = ["."]
+
+[tool.hatch.build.targets.wheel]
+sources = {"." = "prompt_providers"}
+include = ["*.py", "domain/**", "infrastructure/**"]
