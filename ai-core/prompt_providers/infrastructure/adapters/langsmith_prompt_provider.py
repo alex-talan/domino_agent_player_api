@@ -4,7 +4,7 @@ from typing import Protocol
 from langchain_core.prompts import ChatPromptTemplate
 from langsmith.async_client import AsyncClient
 
-from domain.ports.prompt_provider import PromptProvider
+from prompt_providers.domain.ports.prompt_provider import PromptProvider
 
 LANGSMITH_EU_API_URL = "https://eu.api.smith.langchain.com"
 

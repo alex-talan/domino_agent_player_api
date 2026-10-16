@@ -4,18 +4,22 @@ import pytest
 from langchain_core.messages import SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 
-from domain.ports.prompt_provider import PromptProvider
-from infrastructure.adapters.jinja2_prompt_provider import Jinja2PromptProvider
-from infrastructure.adapters.langsmith_prompt_provider import (
+from prompt_providers.domain.ports.prompt_provider import PromptProvider
+from prompt_providers.infrastructure.adapters.jinja2_prompt_provider import (
+    Jinja2PromptProvider,
+)
+from prompt_providers.infrastructure.adapters.langsmith_prompt_provider import (
     LANGSMITH_EU_API_URL,
     LangSmithPromptProvider,
     build_langsmith_client,
 )
-from infrastructure.adapters.markdown_file_prompt_provider import (
+from prompt_providers.infrastructure.adapters.markdown_file_prompt_provider import (
     _DEFAULT_PROMPTS_DIR,
     MarkdownFilePromptProvider,
 )
-from infrastructure.adapters.static_prompt_provider import StaticPromptProvider
+from prompt_providers.infrastructure.adapters.static_prompt_provider import (
+    StaticPromptProvider,
+)
 
 
 def render_system(prompt: ChatPromptTemplate) -> str:
@@ -112,7 +116,7 @@ def test_langsmith_client_factory_uses_eu_endpoint(monkeypatch) -> None:
         return client
 
     monkeypatch.setattr(
-        "infrastructure.adapters.langsmith_prompt_provider.AsyncClient",
+        "prompt_providers.infrastructure.adapters.langsmith_prompt_provider.AsyncClient",
         create_client,
     )
 

@@ -2,6 +2,11 @@
 
 Reusable LangChain chat prompt providers.
 
+Import these providers through `prompt_providers` (for example,
+`from prompt_providers import StaticPromptProvider`). Internal imports are
+package-qualified so this module can be used alongside AI-Core's agents and
+other packages without top-level `domain` or `infrastructure` collisions.
+
 ## API
 
 `PromptProvider[ContextT, PromptT]` keeps the domain contract framework-neutral.

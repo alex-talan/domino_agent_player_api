@@ -2,7 +2,7 @@ from collections.abc import Mapping
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from domain.ports.prompt_provider import PromptProvider
+from prompt_providers.domain.ports.prompt_provider import PromptProvider
 
 
 class Jinja2PromptProvider(

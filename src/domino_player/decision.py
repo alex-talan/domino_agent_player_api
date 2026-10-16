@@ -4,8 +4,15 @@ import asyncio
 import logging
 import time
 import uuid
+from typing import Literal, TypedDict
 
+from agents.infrastructure.adapters.structured_agent import StructuredAgent
 from langchain_core.exceptions import OutputParserException
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
+from prompt_providers.infrastructure.adapters.static_prompt_provider import (
+    StaticPromptProvider,
+)
 from pydantic import ValidationError
 
 from domino_player.config import Settings
@@ -28,10 +35,22 @@ REPAIR_PROMPTS = {
 }
 
 
-class InvalidModelResponse(Exception):
-    def __init__(self, category: str) -> None:
-        super().__init__(category)
-        self.category = category
+class TurnInput(TypedDict):
+    request: PlayRequest
+    request_id: str
+    started: float
+    deadline: float
+
+
+class TurnState(TurnInput):
+    legal_moves: list[LegalMove]
+    player_prompt: str
+    candidate: object
+    move: MoveResponse | None
+    attempts: int
+    retry_count: int
+    source: Literal["llm", "fallback"]
+    failure_category: str | None
 
 
 class DominoPlayer:
@@ -46,6 +65,30 @@ class DominoPlayer:
         self.llm_provider = llm_provider
         self.system_prompt = system_prompt
         self.player_template = player_template
+        # StaticPromptProvider uses f-string templates; preserve literal JSON braces.
+        escaped_system = system_prompt.replace("{", "{{").replace("}", "}}")
+        self.prompt_provider = StaticPromptProvider(escaped_system)
+        self.agent = StructuredAgent(self.prompt_provider, llm_provider, MoveResponse)
+        self.graph = self._build_graph()
+
+    def _build_graph(self) -> CompiledStateGraph[TurnState, None, TurnInput, TurnState]:
+        builder = StateGraph(TurnState, input_schema=TurnInput)
+        builder.add_node("prepare", self._prepare)
+        builder.add_node("decide", self._decide)
+        builder.add_node("validate", self._validate)
+        builder.add_node("repair", self._repair)
+        builder.add_node("fallback", self._fallback)
+        builder.add_node("record", self._record)
+        builder.add_edge(START, "prepare")
+        builder.add_edge("prepare", "decide")
+        builder.add_edge("decide", "validate")
+        builder.add_conditional_edges(
+            "validate", self._route_validation, ["repair", "fallback", "record"]
+        )
+        builder.add_edge("repair", "validate")
+        builder.add_edge("fallback", "record")
+        builder.add_edge("record", END)
+        return builder.compile()
 
     @classmethod
     def create(
@@ -57,122 +100,123 @@ class DominoPlayer:
         return cls(settings, llm_provider, system_prompt, player_template)
 
     async def play(self, request: PlayRequest) -> MoveResponse:
-        request_id = uuid.uuid4().hex
         started = time.monotonic()
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.settings.turn_timeout_seconds
-        legal_moves = enumerate_legal_moves(request)
-        player_prompt = render_player_prompt(
-            self.player_template, request, legal_moves
+        deadline = (
+            asyncio.get_running_loop().time() + self.settings.turn_timeout_seconds
         )
-        messages = [
-            ChatMessage.from_system(self.system_prompt),
-            ChatMessage.from_user(player_prompt),
-        ]
-        retries = 0
-        failure_category: str | None = None
-
-        async def invoke(messages_to_use: list[ChatMessage]) -> MoveResponse:
-            nonlocal retries
-            try:
-                return await self._invoke_and_validate(messages_to_use, legal_moves)
-            finally:
-                retries += self._retry_count()
-
-        try:
-            async with asyncio.timeout_at(deadline):
-                if loop.time() >= deadline:
-                    raise TimeoutError
-                try:
-                    move = await invoke(messages)
-                except InvalidModelResponse as first_error:
-                    failure_category = first_error.category
-                    if loop.time() >= deadline:
-                        raise TimeoutError
-                    repair_messages = [
-                        *messages,
-                        ChatMessage.from_user(REPAIR_PROMPTS[first_error.category]),
-                    ]
-                    move = await invoke(repair_messages)
-                return self._record_decision(
-                    request,
-                    move,
-                    request_id,
-                    "llm",
-                    started,
-                    retries,
-                    None,
-                )
-        except TimeoutError:
-            failure_category = "turn_deadline"
-        except Exception as model_error:
-            failure_category = _failure_category(model_error)
-
-        fallback = choose_fallback(legal_moves)
-        return self._record_decision(
-            request,
-            fallback,
-            request_id,
-            "fallback",
-            started,
-            retries,
-            failure_category or "invalid_model_response",
-        )
-
-    async def _invoke_and_validate(
-        self,
-        messages: list[ChatMessage],
-        legal_moves: list[LegalMove],
-    ) -> MoveResponse:
-        try:
-            response = await self.llm_provider.invoke_structured(
-                messages, MoveResponse
-            )
-        except (ValidationError, OutputParserException) as exc:
-            raise InvalidModelResponse("invalid_response_schema") from exc
-        try:
-            move = MoveResponse.model_validate(response, strict=True)
-        except ValidationError as exc:
-            raise InvalidModelResponse("invalid_response_schema") from exc
-
-        legal = {(item.tile, item.position) for item in legal_moves}
-        if (move.tile, move.position) not in legal:
-            raise InvalidModelResponse("move_not_in_legal_moves")
+        state: TurnInput = {
+            "request": request,
+            "request_id": uuid.uuid4().hex,
+            "started": started,
+            "deadline": deadline,
+        }
+        result = await self.graph.ainvoke(state, config={"recursion_limit": 12})
+        move = result["move"]
+        if not isinstance(move, MoveResponse):
+            raise RuntimeError("Domino graph did not produce a validated move")
         return move
 
-    def _retry_count(self) -> int:
-        return getattr(self.llm_provider, "retry_count", 0)
+    async def _prepare(self, state: TurnInput) -> dict[str, object]:
+        legal_moves = enumerate_legal_moves(state["request"])
+        return {
+            "legal_moves": legal_moves,
+            "player_prompt": render_player_prompt(
+                self.player_template, state["request"], legal_moves
+            ),
+            "attempts": 0,
+            "retry_count": 0,
+            "candidate": None,
+            "move": None,
+            "failure_category": None,
+        }
+
+    async def _decide(self, state: TurnState) -> dict[str, object]:
+        return await self._generate(state, repair=False)
+
+    async def _repair(self, state: TurnState) -> dict[str, object]:
+        return await self._generate(state, repair=True)
+
+    async def _generate(self, state: TurnState, *, repair: bool) -> dict[str, object]:
+        if asyncio.get_running_loop().time() >= state["deadline"]:
+            return {"candidate": None, "failure_category": "turn_deadline"}
+        query = state["player_prompt"]
+        history: list[ChatMessage] | None = None
+        if repair:
+            category = state["failure_category"]
+            assert category is not None
+            query = REPAIR_PROMPTS[category]
+            history = [ChatMessage.from_user(state["player_prompt"])]
+        update: dict[str, object] = {
+            "attempts": state["attempts"] + 1,
+            "candidate": None,
+            "failure_category": None,
+        }
+        try:
+            async with asyncio.timeout_at(state["deadline"]):
+                update["candidate"] = await self.agent.invoke(
+                    query, history=history
+                )
+        except (ValidationError, OutputParserException):
+            update["failure_category"] = "invalid_response_schema"
+        except TimeoutError:
+            update["failure_category"] = "turn_deadline"
+        except Exception as model_error:
+            update["failure_category"] = type(model_error).__name__
+        finally:
+            update["retry_count"] = state["retry_count"] + getattr(
+                self.llm_provider, "retry_count", 0
+            )
+        return update
+
+    async def _validate(self, state: TurnState) -> dict[str, object]:
+        if state["failure_category"] is not None:
+            return {}
+        if asyncio.get_running_loop().time() >= state["deadline"]:
+            return {"failure_category": "turn_deadline"}
+        try:
+            move = MoveResponse.model_validate(state["candidate"], strict=True)
+        except ValidationError:
+            return {"failure_category": "invalid_response_schema"}
+        legal = {(item.tile, item.position) for item in state["legal_moves"]}
+        if (move.tile, move.position) not in legal:
+            return {"failure_category": "move_not_in_legal_moves"}
+        return {"move": move, "source": "llm"}
 
     @staticmethod
-    def _record_decision(
-        request: PlayRequest,
-        move: MoveResponse,
-        request_id: str,
-        source: str,
-        started: float,
-        retries: int,
-        failure_category: str | None,
-    ) -> MoveResponse:
-        elapsed_ms = int((time.monotonic() - started) * 1000)
+    async def _route_validation(
+        state: TurnState,
+    ) -> Literal["repair", "fallback", "record"]:
+        if state["move"] is not None:
+            return "record"
+        if (
+            state["failure_category"] in REPAIR_PROMPTS
+            and state["attempts"] == 1
+            and asyncio.get_running_loop().time() < state["deadline"]
+        ):
+            return "repair"
+        return "fallback"
+
+    async def _fallback(self, state: TurnState) -> dict[str, object]:
+        return {
+            "move": choose_fallback(state["legal_moves"]),
+            "source": "fallback",
+        }
+
+    async def _record(self, state: TurnState) -> dict[str, object]:
+        move = state["move"]
+        assert move is not None
+        elapsed_ms = int((time.monotonic() - state["started"]) * 1000)
         logger.info(
             "domino_decision request_id=%s player=%s tile=%d position=%s "
             "source=%s elapsed_ms=%d retry_count=%d failure_category=%s "
             "token_usage=unavailable",
-            request_id,
-            request.to_play,
+            state["request_id"],
+            state["request"].to_play,
             move.tile,
             move.position,
-            source,
+            state["source"],
             elapsed_ms,
-            retries,
-            failure_category or "none",
+            state["retry_count"],
+            state["failure_category"] or "none",
         )
-        return move
-
-
-def _failure_category(error: Exception) -> str:
-    if isinstance(error, TimeoutError):
-        return "provider_timeout"
-    if isinstance(error, InvalidModelResponse):
-        return error.category
-    return type(error).__name__
+        return {}
