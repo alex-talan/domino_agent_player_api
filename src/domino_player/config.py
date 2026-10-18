@@ -5,9 +5,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
 from llm_providers.domain.ports.llm_provider import LlmProvider
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ENV_FILE = PROJECT_ROOT / ".env"
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
+        load_dotenv(dotenv_path=ENV_FILE, override=False, encoding="utf-8-sig")
         provider = os.getenv("AI_CORE_PROVIDER", "").strip().lower()
         model = os.getenv("AI_CORE_MODEL", "").strip()
         if not provider:
